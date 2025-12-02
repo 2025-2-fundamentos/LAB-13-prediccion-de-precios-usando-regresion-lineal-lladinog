@@ -61,3 +61,116 @@
 # {'type': 'metrics', 'dataset': 'train', 'r2': 0.8, 'mse': 0.7, 'mad': 0.9}
 # {'type': 'metrics', 'dataset': 'test', 'r2': 0.7, 'mse': 0.6, 'mad': 0.8}
 #
+
+import os
+import json
+import gzip
+import pickle
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import GridSearchCV
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.metrics import mean_squared_error, r2_score, median_absolute_error
+
+
+def read_data():
+    train_df = pd.read_csv("files/input/train_data.csv.zip", compression="zip")
+    test_df = pd.read_csv("files/input/test_data.csv.zip", compression="zip")
+    return train_df, test_df
+
+
+def engineer_features(df):
+    df = df.copy()
+    df["Age"] = 2025 - df["Year"]
+    df.drop(columns=["Year", "Car_Name"], inplace=True)
+    return df
+
+
+def split_xy(df):
+    X = df.drop(columns=["Present_Price"])
+    y = df["Present_Price"]
+    return X, y
+
+
+def build_pipeline(X):
+    categorical = ["Fuel_Type", "Selling_type", "Transmission"]
+    numerical = [col for col in X.columns if col not in categorical]
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(), categorical),
+            ("scaler", MinMaxScaler(), numerical),
+        ]
+    )
+    pipeline = Pipeline([
+        ("preprocessor", preprocessor),
+        ("feature_selection", SelectKBest(f_regression)),
+        ("regressor", LinearRegression()),
+    ])
+    return pipeline
+
+
+def train_model(pipeline, X, y):
+    params = {
+        "feature_selection__k": range(1, 12),
+        "regressor__fit_intercept": [True, False],
+        "regressor__positive": [True, False]
+    }
+    grid = GridSearchCV(
+        estimator=pipeline,
+        param_grid=params,
+        cv=10,
+        scoring="neg_mean_absolute_error",
+        n_jobs=-1,
+        refit=True,
+        verbose=1
+    )
+    grid.fit(X, y)
+    return grid
+
+
+def save_model(model):
+    os.makedirs("files/models/", exist_ok=True)
+    with gzip.open("files/models/model.pkl.gz", "wb") as f:
+        pickle.dump(model, f)
+
+
+def compute_metrics(y_true, y_pred, split):
+    return {
+        "type": "metrics",
+        "dataset": split,
+        "r2": float(r2_score(y_true, y_pred)),
+        "mse": float(mean_squared_error(y_true, y_pred)),
+        "mad": float(median_absolute_error(y_true, y_pred)),
+    }
+
+
+def save_metrics(metrics):
+    os.makedirs("files/output/", exist_ok=True)
+    with open("files/output/metrics.json", "w") as f:
+        for m in metrics:
+            f.write(json.dumps(m) + "\n")
+
+
+def main():
+    train_df, test_df = read_data()
+    train_df = engineer_features(train_df)
+    test_df = engineer_features(test_df)
+    X_train, y_train = split_xy(train_df)
+    X_test, y_test = split_xy(test_df)
+    pipeline = build_pipeline(X_train)
+    model = train_model(pipeline, X_train, y_train)
+    save_model(model)
+    y_train_pred = model.predict(X_train)
+    y_test_pred = model.predict(X_test)
+    metrics = [
+        compute_metrics(y_train, y_train_pred, "train"),
+        compute_metrics(y_test, y_test_pred, "test")
+    ]
+    save_metrics(metrics)
+
+
+if __name__ == "__main__":
+    main()
